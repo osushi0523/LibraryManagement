@@ -1,0 +1,12 @@
+# Frontend
+frontend/node_modules/
+frontend/.next/
+
+# Backend
+backend/build/
+backend/.gradle/
+
+# Environment variables
+.env
+.env.*
+!.env.example
