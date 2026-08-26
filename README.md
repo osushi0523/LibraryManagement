@@ -14,7 +14,7 @@
 sequenceDiagram
     autonumber
     actor Browser as Browser (User Interface)
-    participant React as React Client Component
+    participant React as React Component (SSR + Hydration)
     participant BFF as Next.js Route Handler (BFF)
     participant Spring as Spring Boot REST Controller
     participant Service as BookService
@@ -50,7 +50,7 @@ LibraryManagement/
 │   │   │   └── [id]/
 │   │   │       └── route.ts  # [BFF] 詳細取得(GET) / 削除(DELETE) の中継ルーティング
 │   │   ├── books/
-│   │   │   ├── page.tsx      # [React] 書籍一覧画面 (画面表示・操作の受託)
+│   │   │   ├── page.tsx      # [React] 書籍一覧画面 (画面表示・操作)
 │   │   │   ├── new/
 │   │   │   │   └── page.tsx  # [React] 書籍登録画面
 │   │   │   └── [id]/
@@ -58,6 +58,7 @@ LibraryManagement/
 │   │   ├── globals.css       # Vanilla CSS (ライブラリ非依存の最小限スタイル)
 │   │   ├── layout.tsx        # アプリ共通レイアウト
 │   │   └── page.tsx          # ルート(/)アクセス時のリダイレクト処理
+│   ├── public/               # 静的アセット配置用ディレクトリ
 │   ├── package.json
 │   ├── tsconfig.json
 │   ├── next.config.mjs       # Next.js設定 (standalone出力設定)
@@ -88,12 +89,12 @@ LibraryManagement/
 ```
 
 ### 主要ファイルの責務まとめ
-- **`page.tsx`**: ユーザーが操作するUI画面コンポーネント (React)。ブラウザ側で実行され、BFF (`/api/...`) へ `fetch` を送出します。
-- **`route.ts`**: Next.js App RouterのRoute Handler (BFF)。ブラウザからのリクエストを受信し、Spring Boot API へ仲介・プロキシします。
-- **`BookController.java`**: Spring BootのREST APIコントローラー。HTTPリクエストのパス・メソッドを判定し、@Validで入力チェックを行った上でServiceを呼び出します。
-- **`BookService.java`**: 業務処理を担当する領域。Entityの組み立てやリポジトリの呼び出し、トランザクション制御を行います。
-- **`BookRepository.java`**: Spring Data JPAを利用したデータアクセス層。H2データベースに対するSQL発行とオブジェクトマッピングを行います。
-- **`Book.java`**: データベースの `books` テーブルと1対1でマッピングされるEntityクラスです。
+- **`page.tsx`**: ユーザーが操作する UI 画面コンポーネント (React)。Next.js App Router では `"use client"` を指定したコンポーネントも、初回リクエスト時にサーバー上で初期HTMLが事前レンダリング (SSR) された上でブラウザへ送られ、ブラウザ上でハイドレーション（JavaScriptの有効化）されて動的に機能します。ブラウザの操作イベント等に応じて BFF (`/api/...`) へ `fetch` を送出します。
+- **`route.ts`**: Next.js App Router の Route Handler (BFF)。ブラウザからの HTTP リクエストを受信し、Spring Boot REST API へ仲介・プロキシします。
+- **`BookController.java`**: Spring Boot の REST API コントローラー。HTTP リクエストのパス・メソッドを受け取り、`@Valid` で入力チェックを行った上で Service を呼び出します。
+- **`BookService.java`**: 業務処理を担当する領域。Entity の組み立てや Repository の呼び出し、トランザクション制御を行います。
+- **`BookRepository.java`**: Spring Data JPA を利用したデータアクセス層。H2 データベースに対する SQL 発行とオブジェクトマッピングを行います。
+- **`Book.java`**: データベースの `books` テーブルと1対1でマッピングされる JPA Entity クラスです。
 
 ---
 
@@ -103,7 +104,7 @@ Dockerを使わずにローカル環境で起動する手順です。Terminalを
 
 ### Prerequisites
 - Java 21
-- Node.js (v18+)
+- Node.js 18.17.0 以上（推奨: v20 以上）
 
 ### Step 1: Spring Boot の起動 (Terminal 1)
 ```bash
@@ -126,7 +127,29 @@ npm run dev
 
 ---
 
-## 4. Local Docker (Docker Composeを使用する場合)
+## 4. Testing & Build Verification (テスト・ビルド確認方法)
+
+アプリケーションの動作検証やビルドチェックを行うコマンド手順です。
+
+### バックエンドの自動テスト実行
+Spring Boot の REST API 統合テスト (MockMvc による `GET /books`, `POST /books`, `DELETE /books/{id}`) を実行します。
+
+```bash
+cd backend
+./gradlew test
+```
+
+### フロントエンドの型チェック・ビルド確認
+Next.js アプリケーションの TypeScript 型チェックおよび Production ビルド（`output: "standalone"`）を検証します。
+
+```bash
+cd frontend
+npm run build
+```
+
+---
+
+## 5. Local Docker (Docker Composeを使用する場合)
 
 Docker環境でコンテナとして一括起動する手順です。
 
@@ -146,14 +169,61 @@ docker compose down
 
 ---
 
-## 5. Request Flow (ファイル名による処理追跡ロードマップ)
+## 6. Azure App Service デプロイ設定 (Sidecar Container 構成)
+
+本アプリケーションは、Azure App Service の Multi-Container (Sidecar Enabled Container) 構成で動作するように設計されています。
+
+### 概念図 (Azure App Service 上でのトラフィックフロー)
+```
+Internet (User)
+  ↓ HTTPS
+Next.js Main Container (Port 3000)
+  ↓ http://localhost:8080 (App Service 内のローカルループバック通信)
+Spring Boot Sidecar Container (Port 8080)
+  ↓
+H2 In-Memory Database
+```
+
+### ポート設計と環境変数
+App Service の同一 Sidecar 構成内では、Main Container と Sidecar Container は同一のネットワーク名前空間（`localhost`）を共有するため、**ポート番号の衝突を防止する設計** になっています。
+
+- **Next.js Main Container**: `PORT=3000`
+- **Spring Boot Sidecar Container**: `PORT=8080`
+- **`BACKEND_BASE_URL`**: `http://localhost:8080`
+
+### Azure 側で設定が必要な環境変数 (App Settings)
+- **`WEBSITES_PORT`**: `3000`  
+  *(Azure App Service が外部からの HTTP リクエストを Next.js メインコンテナへルーティングするために必須の設定)*
+- **`BACKEND_BASE_URL`**: `http://localhost:8080`  
+  *(Next.js BFF から Sidecar の Spring Boot を呼び出すための URL)*
+
+### デプロイ手順例
+1. **Azure Container Registry (ACR) へのイメージプッシュ**
+   ```bash
+   az acr login --name <your-acr-name>
+
+   # Frontend & Backend のコンテナイメージをビルド＆タグ付け
+   docker build -t <your-acr-name>.azurecr.io/library-frontend:latest ./frontend
+   docker build -t <your-acr-name>.azurecr.io/library-backend:latest ./backend
+
+   # ACRへプッシュ
+   docker push <your-acr-name>.azurecr.io/library-frontend:latest
+   docker push <your-acr-name>.azurecr.io/library-backend:latest
+   ```
+
+2. **App Service へのマルチコンテナデプロイ設定**
+   Azure ポータルまたは `az webapp config container set` で、Main Container に `library-frontend`、Sidecar Container に `library-backend` を設定し、環境変数 `WEBSITES_PORT=3000` および `BACKEND_BASE_URL=http://localhost:8080` を割り当てます。
+
+---
+
+## 7. Request Flow (ファイル名による処理追跡ロードマップ)
 
 各画面操作を行ったときに、どのファイルのどの処理を通るかを実際のファイル名で追跡します。
 
 ### パターン 1: 書籍一覧取得
 
 1. **`frontend/app/books/page.tsx`**  
-   コンポーネント読み込み時に `useEffect` 内で `fetch('/api/books')` を実行。
+   サーバーサイドで事前レンダリング (SSR) され、クライアント側でハイドレーションされた後、`useEffect` 内で `fetch('/api/books')` を実行。
 2. **`frontend/app/api/books/route.ts`**  
    BFFの `GET()` 関数が受け取り、`fetch('${BACKEND_BASE_URL}/books')` で Spring Boot へ仲介。
 3. **`backend/src/main/java/com/example/library/controller/BookController.java`**  
